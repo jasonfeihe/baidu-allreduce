@@ -34,9 +34,9 @@ void TestCollectivesCPU(std::vector<size_t>& sizes, std::vector<size_t>& iterati
                 data[j] = 1.0f;
             }
 
-            float* output;
+            float* output = new float[size];
             timer.start();
-            RingAllreduce(data, size, &output);
+            RingAllreduce(data, size, output);
             seconds += timer.seconds();
 
             // Check that we get the expected result.
@@ -118,8 +118,11 @@ void TestCollectivesGPU(std::vector<size_t>& sizes, std::vector<size_t>& iterati
             if(err != cudaSuccess) { throw std::runtime_error("cudaMemcpy failed with an error"); }
 
             float* output;
+            err = cudaMalloc(&output, sizeof(float) * size);
+            if(err != cudaSuccess) { throw std::runtime_error("cudaMalloc failed with an error"); }
+        
             timer.start();
-            RingAllreduce(data, size, &output);
+            RingAllreduce(data, size, output);
             seconds += timer.seconds();
 
             err = cudaMemcpy(cpu_data, output, sizeof(float) * size, cudaMemcpyDeviceToHost);

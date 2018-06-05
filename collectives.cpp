@@ -8,7 +8,7 @@
 #include <cuda.h>
 #include <mpi.h>
 
-#include "collectives.h"
+#include "mpi_util.h"
 
 struct MPIGlobalState {
     // The CUDA device to run on, or -1 for CPU-only.
@@ -33,12 +33,19 @@ static MPIGlobalState global_state;
 // An exception is thrown if MPI or CUDA cannot be initialized.
 void InitCollectives(int device) {
     if(device < 0) {
+        // CPU-only initialization.
         global_state.device = -1;
     } else {
-        cudaStreamCreate(&global_state.stream);
+        // When doing a CUDA-aware allreduce, the reduction itself (the
+        // summation) must be done on the GPU with an elementwise arithmetic
+        // kernel. We create our own stream to launch these kernels on, so that
+        // the kernels can run independently of any other computation being done
+        // on the GPU.
+        cudaError_t error = cudaStreamCreate(&global_state.stream);
         if(error != cudaSuccess) {
             throw std::runtime_error("cudaStreamCreate failed with an error");
         }
+
         global_state.device = device;
     }
     global_state.initialized = true;
@@ -76,7 +83,7 @@ void dealloc(T* buffer) {
 // Copy data from one memory buffer to another on CPU or GPU.
 // Both buffers must resize on the same device.
 template<class T>
-void copy(T* dst, T* src, size_t size) {
+void copy(T* dst, const T* src, size_t size) {
     if(global_state.device < 0) {
         // CPU memory allocation through standard allocator.
         std::memcpy((void*) dst, (void*) src, size * sizeof(T));
@@ -250,7 +257,7 @@ void RingAllreduce(const T* data, size_t length, T* output) {
     // We know that segment_sizes[0] is going to be the largest buffer size,
     // because if there are any overflow elements at least one will be added to
     // the first segment.
-    T* buffer = alloc(segment_sizes[0]);
+    T* buffer = alloc<T>(segment_sizes[0]);
 
     // Receive from your left neighbor with wrap-around.
     const size_t recv_from = (rank - 1 + size) % size;
@@ -260,7 +267,7 @@ void RingAllreduce(const T* data, size_t length, T* output) {
 
     MPI_Status recv_status;
     MPI_Request recv_req;
-    MPI_Datatype datatype = mpiutil::MPI_DatatypeTraits<T>::type;
+    MPI_Datatype datatype = mpiutil::MPI_DatatypeTraits<T>::type();
 
     // Now start ring. At every step, for every rank, we iterate through
     // segments with wraparound and send and recv from our neighbors and reduce
@@ -276,7 +283,7 @@ void RingAllreduce(const T* data, size_t length, T* output) {
                 datatype, recv_from, 0, MPI_COMM_WORLD, &recv_req);
 
         MPI_Send(segment_send, segment_sizes[send_chunk],
-                mpiutil::MPI_DatatypeTraints<T>::type, send_to, 0, MPI_COMM_WORLD);
+                 mpiutil::MPI_DatatypeTraits<T>::type(), send_to, 0, MPI_COMM_WORLD);
 
         T *segment_update = &(output[segment_ends[recv_chunk] -
                                          segment_sizes[recv_chunk]]);
@@ -350,7 +357,7 @@ void RingAllgather(const T* data, size_t length, T* output_ptr) {
 
     // Allocate the output buffer and copy the input buffer to the right place
     // in the output buffer.
-    T* output = alloc(total_length);
+    T* output = alloc<T>(total_length);
     *output_ptr = output;
 
     copy(output + segment_ends[rank] - segment_sizes[rank],
@@ -363,7 +370,7 @@ void RingAllgather(const T* data, size_t length, T* output_ptr) {
     const size_t send_to = (rank + 1) % size;
 
     // What type of data is being sent
-    MPI_Datatype datatype = mpiutil::MPI_DatatypeTraints<T>::type;
+    MPI_Datatype datatype = mpiutil::MPI_DatatypeTraits<T>::type;
 
     MPI_Status recv_status;
 
